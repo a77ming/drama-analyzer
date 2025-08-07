@@ -6,7 +6,6 @@ import json
 import time
 import datetime
 import os
-import tempfile
 from io import StringIO
 
 # 页面配置
@@ -40,6 +39,249 @@ def extract_total_views(views_str):
         return sum(int(num) for num in numbers)
     
     return 0
+
+class FeishuLabTableReader:
+    """飞书Lab表格读取器"""
+    
+    def __init__(self, app_id: str, app_secret: str):
+        """
+        初始化Lab表格读取器
+        
+        Args:
+            app_id: 飞书应用的App ID
+            app_secret: 飞书应用的App Secret
+        """
+        self.app_id = app_id
+        self.app_secret = app_secret
+        self.tenant_access_token = None
+        self.app_token = "CSs1bClvYaIGl5snunycUcFpngf"  # lab表格的app_token
+        self.table_id = "tblJc7IxgQhQMkKN"  # lab盒子每日收入表格ID
+        self.base_url = "https://open.feishu.cn/open-apis/bitable/v1"
+        
+    def get_tenant_access_token(self) -> str:
+        """获取tenant_access_token"""
+        url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+        
+        payload = {
+            "app_id": self.app_id,
+            "app_secret": self.app_secret
+        }
+        
+        try:
+            response = requests.post(url, json=payload)
+            response.raise_for_status()
+            
+            result = response.json()
+            
+            if result.get("code") == 0:
+                self.tenant_access_token = result.get("tenant_access_token")
+                return self.tenant_access_token
+            else:
+                raise Exception(f"获取访问凭证失败: {result.get('msg', '未知错误')}")
+                
+        except requests.RequestException as e:
+            raise Exception(f"网络请求失败: {str(e)}")
+    
+    def get_headers(self) -> dict:
+        """获取请求头"""
+        if not self.tenant_access_token:
+            self.get_tenant_access_token()
+            
+        return {
+            "Authorization": f"Bearer {self.tenant_access_token}",
+            "Content-Type": "application/json"
+        }
+    
+    def get_table_fields(self) -> list:
+        """获取lab表格的字段信息"""
+        url = f"{self.base_url}/apps/{self.app_token}/tables/{self.table_id}/fields"
+        
+        try:
+            response = requests.get(url, headers=self.get_headers())
+            response.raise_for_status()
+            
+            result = response.json()
+            if result.get("code") == 0:
+                fields = result.get("data", {}).get("items", [])
+                return fields
+            else:
+                raise Exception(f"获取字段信息失败: {result.get('msg', '未知错误')}")
+                
+        except requests.RequestException as e:
+            raise Exception(f"网络请求失败: {str(e)}")
+    
+    def get_table_records(self, page_size: int = 20) -> list:
+        """获取lab表格的记录"""
+        url = f"{self.base_url}/apps/{self.app_token}/tables/{self.table_id}/records"
+        
+        params = {
+            "page_size": page_size
+        }
+        
+        try:
+            response = requests.get(url, headers=self.get_headers(), params=params)
+            response.raise_for_status()
+            
+            result = response.json()
+            if result.get("code") == 0:
+                records = result.get("data", {}).get("items", [])
+                return records
+            else:
+                raise Exception(f"获取记录失败: {result.get('msg', '未知错误')}")
+                
+        except requests.RequestException as e:
+            raise Exception(f"网络请求失败: {str(e)}")
+    
+
+    def get_all_records(self) -> list:
+        """获取所有记录（分页获取）"""
+        all_records = []
+        page_token = None
+        
+        while True:
+            url = f"{self.base_url}/apps/{self.app_token}/tables/{self.table_id}/records"
+            params = {"page_size": 500}
+            if page_token:
+                params["page_token"] = page_token
+            
+            try:
+                response = requests.get(url, headers=self.get_headers(), params=params)
+                response.raise_for_status()
+                
+                result = response.json()
+                if result.get("code") == 0:
+                    data = result.get("data", {})
+                    records = data.get("items", [])
+                    all_records.extend(records)
+                    
+                    # 检查是否还有更多数据
+                    page_token = data.get("page_token")
+                    if not page_token:
+                        break
+                else:
+                    raise Exception(f"获取记录失败: {result.get('msg', '未知错误')}")
+                    
+            except requests.RequestException as e:
+                raise Exception(f"网络请求失败: {str(e)}")
+        
+        st.write(f"📄 总共获取到 {len(all_records)} 条记录")
+        return all_records
+
+    def get_order_amount_by_owner_and_date(self, owner: str, target_date: datetime.date) -> float:
+        """根据归属和日期筛选数据，计算订单金额总和"""
+        try:
+            st.write(f"🔍 搜索条件: 分组='{owner}', 日期='{target_date}'")
+            
+            # 获取字段信息
+            fields = self.get_table_fields()
+            field_map = {field['field_id']: field['field_name'] for field in fields}
+            
+            # 找到关键字段的ID
+            date_field_id = "订单日期"
+            group_field_id = "分组" 
+            amount_field_id = "订单金额(元)"
+            
+            st.write(f"📋 使用关键字段: 分组={group_field_id}, 日期={date_field_id}, 金额={amount_field_id}")
+            
+            # 转换目标日期为时间戳
+            target_timestamp = None
+            try:
+                target_dt = datetime.datetime.combine(target_date, datetime.time.min)
+                target_timestamp = int(target_dt.timestamp() * 1000)  # 转为毫秒时间戳
+                st.write(f"🕐 目标日期时间戳: {target_timestamp}")
+            except Exception as e:
+                st.warning(f"⚠️ 日期解析失败: {e}")
+                target_timestamp = None
+            
+            # 获取所有记录
+            all_records = self.get_all_records()
+            
+            # 筛选数据
+            matched_records = []
+            total_amount = 0
+            
+            for record in all_records:
+                record_fields = record.get('fields', {})
+                
+                # 检查分组
+                group_value = record_fields.get(group_field_id)
+                if not group_value or owner not in str(group_value):
+                    continue
+                
+                # 检查日期（如果指定了）
+                if target_timestamp and date_field_id:
+                    date_value = record_fields.get(date_field_id)
+                    if date_value:
+                        try:
+                            # 将数据库中的时间戳转换为日期进行比较
+                            record_timestamp = int(date_value)
+                            # 检查是否是同一天（允许一天的误差范围）
+                            day_in_ms = 24 * 60 * 60 * 1000
+                            if abs(record_timestamp - target_timestamp) >= day_in_ms:
+                                continue
+                        except (ValueError, TypeError):
+                            # 如果不是时间戳格式，尝试字符串匹配
+                            date_str = str(date_value)
+                            target_date_str = target_date.strftime("%Y-%m-%d")
+                            if target_date_str not in date_str and target_date_str.replace('-', '/') not in date_str:
+                                continue
+                
+                # 获取金额
+                amount_value = record_fields.get(amount_field_id)
+                if amount_value:
+                    try:
+                        # 处理不同的数字格式
+                        if isinstance(amount_value, (int, float)):
+                            amount = float(amount_value)
+                        else:
+                            # 移除可能的货币符号和逗号
+                            amount_str = str(amount_value).replace('￥', '').replace(',', '').strip()
+                            amount = float(amount_str)
+                        
+                        total_amount += amount
+                        
+                        # 格式化日期显示
+                        date_display = record_fields.get(date_field_id, '未知')
+                        if isinstance(date_display, int):
+                            try:
+                                # 将时间戳转换为可读日期
+                                date_obj = datetime.datetime.fromtimestamp(date_display / 1000)
+                                date_display = date_obj.strftime('%Y-%m-%d')
+                            except:
+                                date_display = str(date_display)
+                        
+                        matched_records.append({
+                            'group': group_value,
+                            'date': date_display,
+                            'amount': amount,
+                            'record': record_fields
+                        })
+                    except (ValueError, TypeError):
+                        st.warning(f"⚠️ 无法解析金额: {amount_value}")
+                        continue
+            
+            # 显示结果
+            st.write(f"🎯 搜索结果: 找到匹配记录 {len(matched_records)} 条, 总金额: ¥{total_amount:,.2f}")
+            
+            if matched_records:
+                st.write("📋 匹配的记录:")
+                # 创建DataFrame显示结果
+                display_data = []
+                for item in matched_records:
+                    display_data.append({
+                        '分组': item['group'],
+                        '日期': item['date'],
+                        '金额': f"¥{item['amount']:.2f}"
+                    })
+                
+                df_result = pd.DataFrame(display_data)
+                st.dataframe(df_result, height=200)
+            
+            return total_amount
+            
+        except Exception as e:
+            st.error(f"计算订单金额失败: {str(e)}")
+            return 0.0
 
 class TokenManager:
     def __init__(self):
@@ -216,7 +458,7 @@ def main():
         st.header("⚙️ 配置参数")
         
         # 归属输入
-        owner = st.text_input("归属", placeholder="例如：中科、北斗、叮当")
+        owner = st.text_input("归属", placeholder="例如：中科、北斗")
         
         # 日期输入
         date_input = st.date_input("日期", datetime.date.today())
@@ -232,6 +474,8 @@ def main():
         3. 设置默认上传视频数量
         4. 上传CSV或Excel文件
         5. 点击分析按钮
+        
+        💡 **注意**: Lab订单金额会自动查询前一天的数据
         """)
     
     # 主界面
@@ -300,9 +544,30 @@ def main():
                     
                     progress_bar.progress((i + 1) / len(uploaded_files))
                 
+                # 自动获取Lab订单金额（查询前一天的数据）
+                st.write("🔍 正在获取Lab订单金额...")
+                try:
+                    # 计算前一天的日期
+                    previous_date = date_input - datetime.timedelta(days=1)
+                    st.write(f"💡 查询前一天的订单金额: {previous_date}")
+                    
+                    lab_reader = FeishuLabTableReader(app_id, app_secret)
+                    order_amount = lab_reader.get_order_amount_by_owner_and_date(owner, previous_date)
+                    
+                    if order_amount > 0:
+                        st.write(f"💰 获取到Lab订单金额: ¥{order_amount:.2f}")
+                    else:
+                        st.write("⚠️ 未找到匹配的Lab订单数据，订单金额为 ¥0.00")
+                        order_amount = 0.0
+                        
+                except Exception as e:
+                    st.warning(f"⚠️ 获取Lab订单金额失败: {str(e)}，将使用默认值 ¥0.00")
+                    order_amount = 0.0
+                
                 # 保存结果到 session state
                 st.session_state.analysis_results = {
-                    'all_results': all_results
+                    'all_results': all_results,
+                    'order_amount': order_amount
                 }
                 st.session_state.analysis_params = {
                     'owner': owner,
@@ -325,22 +590,30 @@ def main():
         st.header("📈 分析结果")
         
         # 创建指标卡片
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.metric("总上传成功", all_results['total_uploads'])
         with col2:
             st.metric("总播放量", f"{all_results['total_views']:,}")
         with col3:
+            order_amount = st.session_state.analysis_results.get('order_amount', 0)
+            st.metric("Lab订单金额", f"¥{order_amount:.2f}")
+        with col4:
             st.metric("文件数量", params['file_count'])
         
         # 详细统计
         with st.expander("📊 详细统计"):
+            order_amount = st.session_state.analysis_results.get('order_amount', 0)
+            previous_date = params['date_input'] - datetime.timedelta(days=1)
             st.write("**汇总数据:**")
             st.write(f"- 归属: {params['owner']}")
             st.write(f"- 日期: {params['date_input']}")
             st.write(f"- 文件数量: {params['file_count']}")
             st.write(f"- 总上传成功: {all_results['total_uploads']}")
             st.write(f"- 总播放量: {all_results['total_views']:,}")
+            st.write(f"- Lab订单金额: ¥{order_amount:.2f} (查询日期: {previous_date})")
+        
+
         
         # 写入飞书表格
         if st.button("💾 保存到飞书表格", type="primary"):
@@ -352,11 +625,15 @@ def main():
                     # 转换日期为时间戳
                     timestamp = date_to_timestamp(params['date_input'].strftime("%Y-%m-%d"))
                     
+                    # 获取订单金额
+                    order_amount = st.session_state.analysis_results.get('order_amount', 0)
+                    
                     fields = {
                         "归属": params['owner'],
                         "日期": timestamp,
                         "发布视频数量": int(all_results['total_uploads']),
-                        "总播放量": int(all_results['total_views'])
+                        "总播放量": int(all_results['total_views']),
+                        "出单金额": float(order_amount)  # 添加出单金额字段
                     }
                     
                     result = add_record(token_manager, app_token, table_id, fields)
@@ -387,7 +664,6 @@ def main():
         - **Excel文件**: `.xlsx` 格式
         
         ### 必需的数据列
-        - **状态**: 包含上传状态和限流信息
         - **上传数量**: 上传失败的视频数量
         - **播放量相关列**: 列名包含"播放"字样的列
         
@@ -395,7 +671,6 @@ def main():
         ```
         状态 | 上传数量 | 播放(1234567) | 其他列...
         上传成功#3个 | 0 | 总播放：1715(+9) | ...
-        最近一小时发布视频：5个未限流，2个限流，1个判断失败 | 1 | ... | ...
         ```
         """)
     
